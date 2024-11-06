@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: content-copy
+spec:
+  template:
+    spec:
+      containers:
+      - name: content-copy
+        image: busybox
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo '' > /data/index.html
+          echo '' >> /data/index.html
+          echo 'Welcome to My EKS Demo!' >> /data/index.html
+          echo 'This content is served from a pod in EKS using NFS storage.' >> /data/index.html
+          echo 'Current time: $(date)' >> /data/index.html
+          echo '' >> /data/index.html
+        volumeMounts:
+        - name: web-content
+          mountPath: /data
+      restartPolicy: Never
+      volumes:
+      - name: web-content
+        persistentVolumeClaim:
+          claimName: web-content-pvc

@@ -56,3 +56,226 @@
 
 7. **Test the HTTP server** by showing the sample web content in a browser.
 
+# My solutions
+
+## Task 1
+
+I created a Dockerfile to build and run the AWS CLI from source files using a multi-stage build process. My approach, combined with a lightweight Alpine Linux base image, minimizes the image size by isolating build dependencies and only including essential runtime components in the final image.
+
+```Dockerfile
+# Stage 1: Build the AWS CLI from source
+FROM alpine:3.18 AS builder
+
+RUN apk update && apk add --no-cache cmake make gcc g++ musl-dev libffi-dev python3-dev
+RUN apk add --no-cache python3 py3-pip curl tar gzip make gcc musl-dev libffi-dev openssl-dev
+
+WORKDIR /aws-cli
+RUN curl -L "https://github.com/aws/aws-cli/archive/refs/tags/2.13.1.tar.gz" -o awscli.tar.gz && \
+    tar -xzvf awscli.tar.gz --strip-components=1
+
+RUN pip install .
+
+# Stage 2: Create a minimal runtime image
+FROM alpine:3.18
+
+RUN apk add --no-cache python3 py3-pip
+
+COPY --from=builder /usr/lib/python3.11/site-packages /usr/lib/python3.11/site-packages
+COPY --from=builder /usr/bin/aws /usr/bin/aws
+
+ENTRYPOINT ["aws"]
+```
+
+## Why I Believe This Dockerfile Results in a Small Image
+
+- **Multi-Stage Build**: Using multi-stage builds keeps the build dependencies separate from runtime, so the final image is free from unnecessary tools and libraries.
+
+- **Alpine Linux Base**: Both stages use Alpine Linux, a lightweight distribution that reduces the overall image size.
+
+- **Minimal Dependencies**: Only essential runtime dependencies (`python3` and `py3-pip`) are installed in the final stage, reducing the bloat from unused build dependencies.
+
+- **Selective `COPY` Commands**: By only copying the required `site-packages` and `aws` binary, I avoided including unnecessary files, further reducing the image size.
+
+**Image Size**: 245.13 MB
+
+## Task 2
+Most of the actions detailed in the separated report were performed in the Kubernetes Dashboard for convenience. However, below is an alternative approach to complete the exercise using commands only.
+
+![alt text](Images/kubernetesDashboard.png)
+
+Commands Approach:
+
+## Step 1: Creation of EKS Cluster
+
+```bash
+cat << EOF > cluster.yaml
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: Lab5_Spyra
+  region: us-east-1
+
+nodeGroups:
+  - name: ng-1
+    instanceType: t3.medium
+    desiredCapacity: 2
+    volumeSize: 20
+EOF
+
+eksctl create cluster -f cluster.yaml
+
+aws eks update-kubeconfig --name Lab5_Spyra --region us-east-1
+
+kubectl get nodes
+```
+
+## Step 2: Installation of NFS Server Provisioner
+
+```bash
+helm repo add nfs-ganesha-server-and-external-provisioner https://kubernetes-sigs.github.io/nfs-ganesha-server-and-external-provisioner/
+
+helm repo update
+
+helm install nfs-server-provisioner nfs-ganesha-server-and-external-provisioner/nfs-server-provisioner \
+  --set storageClass.name=nfs-storage \
+  --set storageClass.defaultClass=true
+
+kubectl get pods | grep nfs-server
+kubectl get sc | grep nfs-storage
+```
+
+## Step 3: Creation of Persistent Volume Claim
+
+```bash
+cat << EOF > pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: web-content-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-storage
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+
+kubectl apply -f pvc.yaml
+
+kubectl get pvc web-content-pvc
+```
+
+## Step 4: Creation of Web Server Deployment
+
+```bash
+cat << EOF > deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-server
+  template:
+    metadata:
+      labels:
+        app: web-server
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: web-content
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: web-content
+        persistentVolumeClaim:
+          claimName: web-content-pvc
+EOF
+
+kubectl apply -f deployment.yaml
+
+kubectl get pods -l app=web-server
+```
+
+## Step 5: Creation of Service
+
+```bash
+cat << EOF > service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-server-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: web-server
+  ports:
+  - port: 80
+    targetPort: 80
+EOF
+
+kubectl apply -f service.yaml
+
+kubectl get svc web-server-service
+```
+
+## Step 6: Creation of Job to Copy Content
+
+```bash
+cat << EOF > job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: content-copy
+spec:
+  template:
+    spec:
+      containers:
+      - name: content-copy
+        image: busybox
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo '' > /data/index.html
+          echo '' >> /data/index.html
+          echo 'Welcome to My EKS Demo!' >> /data/index.html
+          echo 'This content is served from a pod in EKS using NFS storage.' >> /data/index.html
+          echo 'Current time: $(date)' >> /data/index.html
+          echo '' >> /data/index.html
+        volumeMounts:
+        - name: web-content
+          mountPath: /data
+      restartPolicy: Never
+      volumes:
+      - name: web-content
+        persistentVolumeClaim:
+          claimName: web-content-pvc
+EOF
+
+kubectl apply -f job.yaml
+
+kubectl get jobs content-copy
+```
+
+## It has worked!
+
+![alt text](Images/serviceWorks.png)
+
+## Clean Up
+
+```bash
+kubectl delete service web-server-service
+kubectl delete deployment web-server
+kubectl delete job content-copy
+kubectl delete pvc web-content-pvc
+helm uninstall nfs-server-provisioner
+
+eksctl delete cluster --name Lab5_Spyra --region us-east-1
+```
