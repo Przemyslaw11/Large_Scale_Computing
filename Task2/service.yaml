@@ -1,4 +1,3 @@
-cat << EOF > service.yaml
 apiVersion: v1
 kind: Service
 metadata:
